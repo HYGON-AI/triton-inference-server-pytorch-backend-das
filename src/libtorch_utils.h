@@ -38,7 +38,11 @@
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #pragma warning(push, 0)
 #include <torch/csrc/jit/codegen/cuda/interface.h>
+#ifndef USE_HCU
+// Not shipped by the Hygon/HIP PyTorch distribution; the legacy fuser
+// API is not used by this backend.
 #include <torch/csrc/jit/codegen/fuser/interface.h>
+#endif
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
 #include <torch/csrc/jit/runtime/graph_executor.h>
 #include <torch/script.h>  // One-stop header for TorchScript

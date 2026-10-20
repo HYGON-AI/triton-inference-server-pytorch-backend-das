@@ -28,8 +28,10 @@
 
 #include "pt/model_instance_state.hh"
 #include "pt/model_state.hh"
+#ifndef USE_HCU
 #include "pt2/model_instance_state.hh"
 #include "pt2/model_state.hh"
+#endif
 #include "triton/backend/backend_common.h"
 #include "triton_utils.hh"
 
@@ -146,6 +148,17 @@ GetModelInfo(
       }
 
       is_pt2 = (platform == "torch_aoti");
+#ifdef USE_HCU
+      if (is_pt2) {
+        return TRITONSERVER_ErrorNew(
+            TRITONSERVER_ERROR_UNSUPPORTED,
+            TOSTRING(
+                "PyTorch 2 (torch_aoti/PT2) models are not supported "
+                "on HCU: the DTK PyTorch distribution does not "
+                "include AOTInductor/AOTI")
+                .c_str());
+      }
+#endif
       model_is_pt2_map[static_cast<void*>(model)] = is_pt2;
     }
   }
@@ -252,6 +265,7 @@ TRITONBACKEND_ModelInitialize(TRITONBACKEND_Model* model)
   RETURN_IF_ERROR(
       GetModelInfo(model, model_name, model_version, artifact_type, is_pt2));
 
+#ifndef USE_HCU
   if (is_pt2) {
     // Create an ModelState object and associate it with the
     // TRITONBACKEND_Model.
@@ -276,7 +290,9 @@ TRITONBACKEND_ModelInitialize(TRITONBACKEND_Model* model)
               << model_name << "\""
               << ", version " << model_version << ": " << ex.what()));
     }
-  } else {
+  } else
+#endif
+  {
     // Create a ModelState object and associate it with the
     // TRITONBACKEND_Model.
     pt::ModelState* model_state;
@@ -303,11 +319,14 @@ TRITONBACKEND_ModelFinalize(TRITONBACKEND_Model* model)
   void* vmodel;
   RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodel));
 
+#ifndef USE_HCU
   if (is_pt2) {
     pt2::ModelState* model_state = reinterpret_cast<pt2::ModelState*>(vmodel);
 
     delete model_state;
-  } else {
+  } else
+#endif
+  {
     pt::ModelState* model_state = reinterpret_cast<pt::ModelState*>(vmodel);
 
     delete model_state;
@@ -343,6 +362,7 @@ TRITONBACKEND_ModelInstanceInitialize(TRITONBACKEND_ModelInstance* instance)
   void* vmodel;
   RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodel));
 
+#ifndef USE_HCU
   if (is_pt2) {
     auto model_state = reinterpret_cast<pt2::ModelState*>(vmodel);
 
@@ -372,7 +392,9 @@ TRITONBACKEND_ModelInstanceInitialize(TRITONBACKEND_ModelInstance* instance)
     }
 
     return nullptr;  // success
-  } else {
+  } else
+#endif
+  {
     pt::ModelState* model_state = reinterpret_cast<pt::ModelState*>(vmodel);
 
     // Create a ModelInstanceState object and associate it with the
@@ -406,10 +428,13 @@ TRITONBACKEND_ModelInstanceFinalize(TRITONBACKEND_ModelInstance* instance)
   void* vmodel;
   RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(instance, &vmodel));
 
+#ifndef USE_HCU
   if (is_pt2) {
     auto instance_state = reinterpret_cast<pt2::ModelInstanceState*>(vmodel);
     delete instance_state;
-  } else {
+  } else
+#endif
+  {
     auto instance_state = reinterpret_cast<pt::ModelInstanceState*>(vmodel);
     delete instance_state;
   }
@@ -451,6 +476,7 @@ TRITONBACKEND_ModelInstanceExecute(
   // function-local and model-instance-specific state (obtained from
   // 'instance'), which is what we do here.
 
+#ifndef USE_HCU
   if (is_pt2) {
     pt2::ModelInstanceState* instance_state{nullptr};
     RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(
@@ -471,7 +497,7 @@ TRITONBACKEND_ModelInstanceExecute(
 
     // At this point we accept ownership of 'requests', which means that
     // even if something goes wrong we must still return success from
-    // this function. If something does go wrong in processing a
+    // this function. If something goes wrong in processing a
     // particular request then we send an error response just for the
     // specific request.
     instance_state->ProcessRequests(requests, request_count);
@@ -479,7 +505,9 @@ TRITONBACKEND_ModelInstanceExecute(
     if (model_state->CacheCleaningEnabled()) {
       instance_state->ClearCache();
     }
-  } else {
+  } else
+#endif
+  {
     pt::ModelInstanceState* instance_state{nullptr};
     RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(
         instance, reinterpret_cast<void**>(&instance_state)));

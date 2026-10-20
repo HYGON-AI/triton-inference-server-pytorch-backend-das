@@ -42,9 +42,17 @@
 #endif  // TRITON_PYTORCH_ENABLE_TORCHVISION
 
 #ifdef TRITON_ENABLE_GPU
+#ifdef USE_HCU
+#include <c10/hip/HIPCachingAllocator.h>
+#include <c10/hip/HIPFunctions.h>
+#include <c10/hip/HIPGuard.h>
+#include <c10/hip/HIPStream.h>
+#include <hip/hip_runtime_api.h>
+#else
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime_api.h>
+#endif  // USE_HCU
 #endif  // TRITON_ENABLE_GPU
 
 namespace triton::backend::pytorch::pt {
@@ -63,7 +71,11 @@ ModelInstanceState::ModelInstanceState(
   }
 
 #ifdef TRITON_ENABLE_GPU
+#ifdef USE_HCU
+  device_cnt_ = c10::hip::device_count();
+#else
   device_cnt_ = torch::cuda::device_count();
+#endif
 #endif
 
   THROW_IF_BACKEND_INSTANCE_ERROR(model_state->LoadModel(
@@ -218,7 +230,11 @@ ModelInstanceState::ClearCache()
 #ifdef TRITON_ENABLE_GPU
   if (device_.is_cuda() ||
       ((Kind() == TRITONSERVER_INSTANCEGROUPKIND_MODEL) && (device_cnt_ > 0))) {
+#ifdef USE_HCU
+    c10::hip::HIPCachingAllocator::emptyCache();
+#else
     c10::cuda::CUDACachingAllocator::emptyCache();
+#endif
   }
 #endif  // TRITON_ENABLE_GPU
 }
@@ -1058,6 +1074,11 @@ ModelInstanceState::SetCurrentCudaStream(
     const cudaStream_t& stream, const int& device_id)
 {
 #ifdef TRITON_ENABLE_GPU
+#ifdef USE_HCU
+  c10::hip::HIPStream torch_stream =
+      c10::hip::getStreamFromExternal(stream, device_id);
+  c10::hip::setCurrentHIPStream(torch_stream);
+#else
   at::cuda::CUDAStream torch_stream =
       at::cuda::getStreamFromExternal(stream, device_id);
   // This function replaces the default stream with the stream we created. It
@@ -1065,6 +1086,7 @@ ModelInstanceState::SetCurrentCudaStream(
   // replacing the default stream for that device. See the documentation here:
   // https://pytorch.org/cppdocs/api/function_namespacec10_1_1cuda_1a6ed50cc0fc16cc7014d9c2f4c3bd098d.html
   at::cuda::setCurrentCUDAStream(torch_stream);
+#endif
 #endif
 }
 

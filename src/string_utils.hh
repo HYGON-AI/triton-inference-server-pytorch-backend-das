@@ -54,9 +54,15 @@
 #endif  // TRITON_PYTORCH_ENABLE_TORCHVISION
 
 #ifdef TRITON_ENABLE_GPU
+#ifdef USE_HCU
+#include <c10/hip/HIPCachingAllocator.h>
+#include <c10/hip/HIPGuard.h>
+#include <hip/hip_runtime_api.h>
+#else
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime_api.h>
+#endif  // USE_HCU
 #endif  // TRITON_ENABLE_GPU
 
 // for thread control

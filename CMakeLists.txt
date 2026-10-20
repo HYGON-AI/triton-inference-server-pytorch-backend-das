@@ -60,11 +60,22 @@ option(TRITON_PYTORCH_ENABLE_TORCHVISION "Enable Torchvision support" ON)
 option(TRITON_PYTORCH_NVSHMEM "Enable NVSHMEM support" ON)
 option(TRITON_PYTORCH_OPTREE "Enable OpTree support" OFF)
 
+# HCU (Hygon DTK / ROCm HIP) support. When ON the backend is built against
+# the DTK CUDA compatibility layer and the Hygon (-das) forks of
+# common/core/backend instead of the NVIDIA ones.
+option(USE_HCU "Build with Hygon HCU (DTK/HIP) instead of NVIDIA CUDA" OFF)
+
 set(TRITON_PYTORCH_DOCKER_IMAGE "" CACHE STRING "Docker image containing the PyTorch build required by backend.")
 set(TRITON_PYTORCH_INCLUDE_PATHS "" CACHE PATH "Paths to Torch includes")
 set(TRITON_PYTORCH_LIB_PATHS "" CACHE PATH "Paths to Torch libraries")
 
-set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
+if(USE_HCU)
+    # NVSHMEM and TorchVision are not part of the HCU PyTorch distribution.
+  set(TRITON_PYTORCH_NVSHMEM OFF CACHE BOOL "NVSHMEM is not available on HCU" FORCE)
+  set(TRITON_PYTORCH_ENABLE_TORCHVISION OFF CACHE BOOL "TorchVision is not available on HCU" FORCE)
+endif()
+
+set(TRITON_REPO_ORGANIZATION "https://github.com/HYGON-AI" CACHE STRING "Git repository to pull from")
 set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
 set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
 set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
@@ -141,21 +152,27 @@ message(TRACE "PY_INSTALL_PATH: ${PY_INSTALL_PATH}")
 #
 include(FetchContent)
 
+
+set(TRITON_COMMON_GIT_REPOSITORY "${TRITON_REPO_ORGANIZATION}/triton-inference-server-common-das.git")
+set(TRITON_CORE_GIT_REPOSITORY "${TRITON_REPO_ORGANIZATION}/triton-inference-server-core-das.git")
+set(TRITON_BACKEND_GIT_REPOSITORY "${TRITON_REPO_ORGANIZATION}/triton-inference-server-backend-das.git")
+
+
 FetchContent_Declare(
   repo-common
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/common.git
+  GIT_REPOSITORY ${TRITON_COMMON_GIT_REPOSITORY}
   GIT_TAG ${TRITON_COMMON_REPO_TAG}
   GIT_SHALLOW ON
 )
 FetchContent_Declare(
   repo-core
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/core.git
+  GIT_REPOSITORY ${TRITON_CORE_GIT_REPOSITORY}
   GIT_TAG ${TRITON_CORE_REPO_TAG}
   GIT_SHALLOW ON
 )
 FetchContent_Declare(
   repo-backend
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/backend.git
+  GIT_REPOSITORY ${TRITON_BACKEND_GIT_REPOSITORY}
   GIT_TAG ${TRITON_BACKEND_REPO_TAG}
   GIT_SHALLOW ON
 )
@@ -207,7 +224,20 @@ endif() # TRITON_PYTORCH_OPTREE
 # CUDA
 #
 if(${TRITON_ENABLE_GPU})
-  find_package(CUDAToolkit REQUIRED)
+  if(USE_HCU)
+    # HCU: build with hipcc/HIP. Torch's public headers are CUDA-flavoured
+    # (c10/cuda, ATen/cuda), so src/hcu_cuda_shim provides HIP-based
+    # <cuda*.h> headers that map the CUDA spellings onto HIP.
+    find_package(hip REQUIRED)
+    add_compile_definitions(USE_HCU=1)
+    # The DTK PyTorch distribution does not ship the generated
+    # c10/cuda/impl/cuda_cmake_macros.h header; CUDAMacros.h has an
+    # explicit opt-out for that case.
+    add_compile_definitions(C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
+    message(STATUS "Using HIP/DTK at ${hip_DIR}")
+  else()
+    find_package(CUDAToolkit REQUIRED)
+  endif()
 else()
   if (${TRITON_PYTORCH_ENABLE_TORCHTRT})
     message(FATAL_ERROR "TRITON_PYTORCH_ENABLE_TORCHTRT is ON when TRITON_ENABLE_GPU is OFF")
@@ -238,6 +268,12 @@ set(PT_LIBS
     "libtorch_python.so"
     "libcaffe2_nvrtc.so"
 )
+
+if(USE_HCU)
+  # Hygon PyTorch ships HIP-named libraries instead of the CUDA ones.
+  list(REMOVE_ITEM PT_LIBS "libc10_cuda.so" "libtorch_cuda.so" "libtorch_cuda_linalg.so" "libcaffe2_nvrtc.so" "libjpeg.so.62" "libpng16.so.16")
+  list(APPEND PT_LIBS "libc10_hip.so" "libtorch_hip.so")
+endif()
 
 if (${TRITON_PYTORCH_NVSHMEM})
   set(PT_LIBS
@@ -381,11 +417,20 @@ add_library(
   src/triton_exception.cc
   src/pt/model_state.cc
   src/pt/model_instance_state.cc
-  src/pt2/model_state.cc
-  src/pt2/model_instance_state.cc
-  src/pt2/call_spec.cc
-  src/pt2/io_data.cc
 )
+
+# The DTK/HIP PyTorch distribution does not provide the AOTInductor
+# headers or runtime symbols, so PT2 (torch_aoti) support is disabled
+# for HCU builds. TorchScript (.pt) models are unaffected.
+if(NOT USE_HCU)
+  target_sources(
+    triton-pytorch-backend PRIVATE
+    src/pt2/model_state.cc
+    src/pt2/model_instance_state.cc
+    src/pt2/call_spec.cc
+    src/pt2/io_data.cc
+  )
+endif()
 
 add_library(
   TritonPyTorchBackend::triton-pytorch-backend ALIAS triton-pytorch-backend
@@ -414,6 +459,14 @@ else()
       ${TRITON_PYTORCH_INCLUDE_PATHS}
   )
 endif() # TRITON_PYTORCH_DOCKER_BUILD
+
+if(USE_HCU)
+  # HIP-based <cuda*.h> shims for Torch's CUDA-flavoured public headers.
+  target_include_directories(
+    triton-pytorch-backend BEFORE PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/hcu_cuda_shim
+  )
+endif()
 
 # Need to turn off -Werror due to Torchvision vision.h extern initialization
 # Unfortunately gcc does not provide a specific flag to ignore the specific
@@ -514,7 +567,8 @@ target_link_libraries(
     ${TRITON_PYTORCH_LDFLAGS}
     ${TRITON_PYTORCH_LIBS}
     $<$<BOOL:${TRITON_PYTORCH_OPTREE}>:optree>
-    $<$<BOOL:${TRITON_ENABLE_GPU}>:CUDA::cudart>
+    $<$<AND:$<BOOL:${TRITON_ENABLE_GPU}>,$<NOT:$<BOOL:${USE_HCU}>>>:CUDA::cudart>
+    $<$<AND:$<BOOL:${TRITON_ENABLE_GPU}>,$<BOOL:${USE_HCU}>>:hip::host>
 )
 
 #
