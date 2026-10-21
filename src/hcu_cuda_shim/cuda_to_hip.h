@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: BSD-3-Clause
+
 // HCU (Hygon DTK / ROCm HIP) compatibility mapping.
 //
 // Torch's public headers are CUDA-flavoured (c10/cuda/*, ATen/cuda/*) and

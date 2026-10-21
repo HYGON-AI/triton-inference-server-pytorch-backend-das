@@ -28,6 +28,27 @@
 
 # PyTorch (LibTorch) Backend
 
+## Upstream Baseline and HYGON Modifications
+
+- Upstream project: PyTorch Backend
+- Upstream repository: https://github.com/triton-inference-server/pytorch_backend
+- Upstream branch: r26.09
+- Upstream Commit: df1a20dfc352b22ff8c7bc2165bc8c9f5d137531
+- Upstream license: BSD-3-Clause
+- Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+Modified by Hygon Information Technology Co., Ltd.
+
+HYGON Contributions:
+
+- HCU (Hygon DTK / ROCm HIP) build path: adds the `USE_HCU` CMake option, a
+  CUDA-to-HIP compatibility shim under `src/hcu_cuda_shim/`, and HIP-specific
+  handling in the LibTorch model instance and utility code, while the default
+  CUDA path stays unchanged.
+- The HCU adaptation is contributed under the repository BSD-3-Clause license.
+  Modified upstream files keep their original NVIDIA copyright and license
+  headers unchanged.
+
 [![License](https://img.shields.io/badge/License-BSD3-lightgrey.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
 The Triton backend for

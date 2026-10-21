@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: BSD-3-Clause
+
 #pragma once
 // HCU: HIP-based stand-in for the CUDA driver API header.
 #include <hip/hip_runtime_api.h>
