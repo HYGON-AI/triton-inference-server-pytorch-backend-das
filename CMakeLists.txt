@@ -59,29 +59,49 @@ option(TRITON_PYTORCH_ENABLE_TORCHTRT "Enable TorchTRT support" OFF)
 option(TRITON_PYTORCH_ENABLE_TORCHVISION "Enable Torchvision support" ON)
 option(TRITON_PYTORCH_NVSHMEM "Enable NVSHMEM support" ON)
 option(TRITON_PYTORCH_OPTREE "Enable OpTree support" OFF)
+option(TRITON_PYTORCH_ENABLE_PT2 "Enable PyTorch 2 AOTInductor (torch_aoti) support" ON)
 
-# HCU (Hygon DTK / ROCm HIP) support. When ON the backend is built against
-# the DTK CUDA compatibility layer and the Hygon (-das) forks of
-# common/core/backend instead of the NVIDIA ones.
+# HCU (Hygon DTK / ROCm HIP) support. When ON the backend is built with
+# hipcc/HIP against the installed HCU Triton backend and the DTK PyTorch
+# distribution.
 option(USE_HCU "Build with Hygon HCU (DTK/HIP) instead of NVIDIA CUDA" OFF)
 
 set(TRITON_PYTORCH_DOCKER_IMAGE "" CACHE STRING "Docker image containing the PyTorch build required by backend.")
 set(TRITON_PYTORCH_INCLUDE_PATHS "" CACHE PATH "Paths to Torch includes")
 set(TRITON_PYTORCH_LIB_PATHS "" CACHE PATH "Paths to Torch libraries")
 
-if(USE_HCU)
-    # NVSHMEM and TorchVision are not part of the HCU PyTorch distribution.
-  set(TRITON_PYTORCH_NVSHMEM OFF CACHE BOOL "NVSHMEM is not available on HCU" FORCE)
-  set(TRITON_PYTORCH_ENABLE_TORCHVISION OFF CACHE BOOL "TorchVision is not available on HCU" FORCE)
-endif()
-
-set(TRITON_REPO_ORGANIZATION "https://github.com/HYGON-AI" CACHE STRING "Git repository to pull from")
-set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
-set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
-set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
+# The backend is built against an already installed Triton (headers, static
+# libraries and CMake package configs), never against source checkouts.
+# TRITON_CORE_PATH / TRITON_BACKEND_PATH default to the same-named
+# environment variables and are only used to extend CMAKE_PREFIX_PATH; any
+# prefix containing lib/cmake/TritonCore also works via CMAKE_PREFIX_PATH.
+set(TRITON_CORE_PATH "$ENV{TRITON_CORE_PATH}" CACHE PATH "Path to installed Triton core")
+set(TRITON_BACKEND_PATH "$ENV{TRITON_BACKEND_PATH}" CACHE PATH "Path to installed Triton backend")
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Python.h needed by torch headers.
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+
+# Auto-detect the PyTorch installation from the Python environment unless
+# the caller provided explicit paths or a docker image.
+if(TRITON_PYTORCH_LIB_PATHS STREQUAL "" AND TRITON_PYTORCH_DOCKER_IMAGE STREQUAL "")
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import torch, os; print(os.path.dirname(torch.__file__))"
+    OUTPUT_VARIABLE TRITON_PYTORCH_ROOT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE TRITON_PYTORCH_FIND_STATUS)
+  if(NOT TRITON_PYTORCH_FIND_STATUS EQUAL 0 OR TRITON_PYTORCH_ROOT STREQUAL "")
+    message(FATAL_ERROR
+      "Unable to locate PyTorch from the Python environment. Install PyTorch "
+      "or set TRITON_PYTORCH_INCLUDE_PATHS / TRITON_PYTORCH_LIB_PATHS.")
+  endif()
+  set(TRITON_PYTORCH_INCLUDE_PATHS
+      "${TRITON_PYTORCH_ROOT}/include;${TRITON_PYTORCH_ROOT}/include/torch/csrc/api/include")
+  set(TRITON_PYTORCH_LIB_PATHS "${TRITON_PYTORCH_ROOT}/lib")
+  message(STATUS "Auto-detected PyTorch at ${TRITON_PYTORCH_ROOT}")
 endif()
 
 set(TRITON_PYTORCH_DOCKER_BUILD OFF)
@@ -92,20 +112,36 @@ if(TRITON_PYTORCH_LIB_PATHS STREQUAL "")
   set(TRITON_PYTORCH_DOCKER_BUILD ON)
   message(STATUS "Using PyTorch docker: ${TRITON_PYTORCH_DOCKER_IMAGE}")
 else()
-  # Look for installed Torch-TRT package in lib paths
+  if(NOT TRITON_PYTORCH_ROOT)
+    get_filename_component(TRITON_PYTORCH_ROOT "${TRITON_PYTORCH_LIB_PATHS}" DIRECTORY)
+  endif()
+
+  # Torch-TRT is optional and only usable when its runtime library exists.
   if(TRITON_PYTORCH_ENABLE_TORCHTRT AND NOT EXISTS "${TRITON_PYTORCH_LIB_PATHS}/libtorchtrt_runtime.so")
     message(WARNING "TRITON_PYTORCH_ENABLE_TORCHTRT is on, but TRITON_PYTORCH_LIB_PATHS does not contain Torch-TRT package")
   endif()
 
-    # Look for installed TorchVision package in lib paths
+  # TorchVision is optional: enable it only when the runtime library exists.
   find_library(LIBTORCHVISION libtorchvision.so libtorchvision.so.1 PATHS ${TRITON_PYTORCH_LIB_PATHS})
-  if(NOT ${LIBTORCHVISION})
-    message(WARNING "TRITON_PYTORCH_ENABLE_TORCHVISION is on, but TRITON_PYTORCH_LIB_PATHS does not contain TorchVision package")
-  endif(NOT ${LIBTORCHVISION})
-endif()
+  if(NOT LIBTORCHVISION AND TRITON_PYTORCH_ENABLE_TORCHVISION)
+    message(STATUS "TorchVision not found in ${TRITON_PYTORCH_LIB_PATHS}; disabling TorchVision support")
+    set(TRITON_PYTORCH_ENABLE_TORCHVISION OFF CACHE BOOL "Enable Torchvision support" FORCE)
+  endif()
 
-# Python.h needed by torch headers.
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+  # NVSHMEM is only shipped by NVIDIA PyTorch builds.
+  if(TRITON_PYTORCH_NVSHMEM AND NOT EXISTS "${TRITON_PYTORCH_LIB_PATHS}/libtorch_nvshmem.so")
+    message(STATUS "NVSHMEM library not found; disabling NVSHMEM support")
+    set(TRITON_PYTORCH_NVSHMEM OFF CACHE BOOL "Enable NVSHMEM support" FORCE)
+  endif()
+
+  # PyTorch 2 AOTInductor (torch_aoti / PT2) requires the AOTI package
+  # loader headers; distributions without them cannot use it.
+  if(TRITON_PYTORCH_ENABLE_PT2 AND NOT EXISTS
+     "${TRITON_PYTORCH_ROOT}/include/torch/csrc/inductor/aoti_package/model_package_loader.h")
+    message(STATUS "AOTInductor headers not found in ${TRITON_PYTORCH_ROOT}; disabling PT2 (torch_aoti) support")
+    set(TRITON_PYTORCH_ENABLE_PT2 OFF CACHE BOOL "Enable PyTorch 2 AOTInductor (torch_aoti) support" FORCE)
+  endif()
+endif()
 
 set(RHEL_BUILD OFF)
 set(LIB_DIR "lib")
@@ -134,10 +170,10 @@ message(TRACE "TRITON_PYTORCH_OPTREE: ${TRITON_PYTORCH_OPTREE}")
 message(TRACE "TRITON_PYTORCH_DOCKER_IMAGE: ${TRITON_PYTORCH_DOCKER_IMAGE}")
 message(TRACE "TRITON_PYTORCH_INCLUDE_PATHS: ${TRITON_PYTORCH_INCLUDE_PATHS}")
 message(TRACE "TRITON_PYTORCH_LIB_PATHS: ${TRITON_PYTORCH_LIB_PATHS}")
-message(TRACE "TRITON_REPO_ORGANIZATION: ${TRITON_REPO_ORGANIZATION}")
-message(TRACE "TRITON_BACKEND_REPO_TAG: ${TRITON_BACKEND_REPO_TAG}")
-message(TRACE "TRITON_CORE_REPO_TAG: ${TRITON_CORE_REPO_TAG}")
-message(TRACE "TRITON_COMMON_REPO_TAG: ${TRITON_COMMON_REPO_TAG}")
+message(TRACE "TRITON_CORE_PATH: ${TRITON_CORE_PATH}")
+message(TRACE "TRITON_BACKEND_PATH: ${TRITON_BACKEND_PATH}")
+message(TRACE "TRITON_PYTORCH_ROOT: ${TRITON_PYTORCH_ROOT}")
+message(TRACE "TRITON_PYTORCH_ENABLE_PT2: ${TRITON_PYTORCH_ENABLE_PT2}")
 message(TRACE "TRITON_PYTORCH_DOCKER_BUILD: ${TRITON_PYTORCH_DOCKER_BUILD}")
 message(TRACE "RHEL_BUILD: ${RHEL_BUILD}")
 message(TRACE "LIB_DIR: ${LIB_DIR}")
@@ -145,38 +181,69 @@ message(TRACE "LIBTORCH_LIBS_PATH: ${LIBTORCH_LIBS_PATH}")
 message(TRACE "PY_INSTALL_PATH: ${PY_INSTALL_PATH}")
 
 #
-# Dependencies
+# Dependencies (already installed Triton core / backend)
 #
-# FetchContent's composability isn't very good. We must include the
-# transitive closure of all repos so that we can override the tag.
-#
-include(FetchContent)
+if(TRITON_CORE_PATH)
+  list(APPEND CMAKE_PREFIX_PATH "${TRITON_CORE_PATH}")
+endif()
+if(TRITON_BACKEND_PATH)
+  list(APPEND CMAKE_PREFIX_PATH "${TRITON_BACKEND_PATH}")
+endif()
 
+# Triton core/backend are consumed from an existing installation: only
+# the public headers, the static backend utilities and the core stub
+# library are required -- no source checkout is involved.
+set(TRITON_INSTALL_PREFIX "")
+if(TRITON_CORE_PATH)
+  set(TRITON_INSTALL_PREFIX "${TRITON_CORE_PATH}")
+elseif(TRITON_BACKEND_PATH)
+  set(TRITON_INSTALL_PREFIX "${TRITON_BACKEND_PATH}")
+elseif(CMAKE_PREFIX_PATH)
+  list(GET CMAKE_PREFIX_PATH 0 TRITON_INSTALL_PREFIX)
+endif()
+if(NOT TRITON_INSTALL_PREFIX)
+  message(FATAL_ERROR
+    "Set TRITON_CORE_PATH / TRITON_BACKEND_PATH (or CMAKE_PREFIX_PATH) to "
+    "the Triton installation prefix.")
+endif()
 
-set(TRITON_COMMON_GIT_REPOSITORY "${TRITON_REPO_ORGANIZATION}/triton-inference-server-common-das.git")
-set(TRITON_CORE_GIT_REPOSITORY "${TRITON_REPO_ORGANIZATION}/triton-inference-server-core-das.git")
-set(TRITON_BACKEND_GIT_REPOSITORY "${TRITON_REPO_ORGANIZATION}/triton-inference-server-backend-das.git")
+set(TRITON_INCLUDE_DIR "${TRITON_INSTALL_PREFIX}/include")
+set(TRITON_LIB_DIR "${TRITON_INSTALL_PREFIX}/lib")
+message(STATUS "Using installed Triton at ${TRITON_INSTALL_PREFIX}")
 
+add_library(triton-core-serverapi INTERFACE IMPORTED)
+set_target_properties(triton-core-serverapi PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${TRITON_INCLUDE_DIR}")
+add_library(triton-core-backendapi INTERFACE IMPORTED)
+set_target_properties(triton-core-backendapi PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${TRITON_INCLUDE_DIR}")
+add_library(triton-core-serverstub SHARED IMPORTED)
+set_target_properties(triton-core-serverstub PROPERTIES
+  IMPORTED_LOCATION "${TRITON_LIB_DIR}/stubs/libtritonserver.so")
 
-FetchContent_Declare(
-  repo-common
-  GIT_REPOSITORY ${TRITON_COMMON_GIT_REPOSITORY}
-  GIT_TAG ${TRITON_COMMON_REPO_TAG}
-  GIT_SHALLOW ON
-)
-FetchContent_Declare(
-  repo-core
-  GIT_REPOSITORY ${TRITON_CORE_GIT_REPOSITORY}
-  GIT_TAG ${TRITON_CORE_REPO_TAG}
-  GIT_SHALLOW ON
-)
-FetchContent_Declare(
-  repo-backend
-  GIT_REPOSITORY ${TRITON_BACKEND_GIT_REPOSITORY}
-  GIT_TAG ${TRITON_BACKEND_REPO_TAG}
-  GIT_SHALLOW ON
-)
-FetchContent_MakeAvailable(repo-common repo-core repo-backend)
+add_library(triton-common-async-work-queue STATIC IMPORTED)
+set_target_properties(triton-common-async-work-queue PROPERTIES
+  IMPORTED_LOCATION "${TRITON_LIB_DIR}/libtritonasyncworkqueue.a")
+add_library(triton-common-logging STATIC IMPORTED)
+set_target_properties(triton-common-logging PROPERTIES
+  IMPORTED_LOCATION "${TRITON_LIB_DIR}/libtritoncommonlogging.a")
+add_library(triton-common-error STATIC IMPORTED)
+set_target_properties(triton-common-error PROPERTIES
+  IMPORTED_LOCATION "${TRITON_LIB_DIR}/libtritoncommonerror.a")
+add_library(triton-common-json INTERFACE IMPORTED)
+set_target_properties(triton-common-json PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${TRITON_INCLUDE_DIR}")
+
+add_library(kernel_library_new STATIC IMPORTED)
+set_target_properties(kernel_library_new PROPERTIES
+  IMPORTED_LOCATION "${TRITON_LIB_DIR}/libkernel_library_new.a")
+
+add_library(triton-backend-utils STATIC IMPORTED)
+set_target_properties(triton-backend-utils PROPERTIES
+  IMPORTED_LOCATION "${TRITON_LIB_DIR}/libtritonbackendutils.a"
+  INTERFACE_INCLUDE_DIRECTORIES "${TRITON_INCLUDE_DIR}"
+  INTERFACE_LINK_LIBRARIES
+    "triton-core-backendapi;triton-core-serverapi;triton-common-async-work-queue;triton-common-json")
 
 
 # Fetch and Build OpTree if enabled.
@@ -230,10 +297,11 @@ if(${TRITON_ENABLE_GPU})
     # <cuda*.h> headers that map the CUDA spellings onto HIP.
     find_package(hip REQUIRED)
     add_compile_definitions(USE_HCU=1)
-    # The DTK PyTorch distribution does not ship the generated
-    # c10/cuda/impl/cuda_cmake_macros.h header; CUDAMacros.h has an
-    # explicit opt-out for that case.
-    add_compile_definitions(C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
+    if(NOT EXISTS "${TRITON_PYTORCH_ROOT}/include/c10/cuda/impl/cuda_cmake_macros.h")
+      # CUDAMacros.h has an explicit opt-out for PyTorch builds that do not
+      # generate this header (as in the Hygon DTK distribution).
+      add_compile_definitions(C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
+    endif()
     message(STATUS "Using HIP/DTK at ${hip_DIR}")
   else()
     find_package(CUDAToolkit REQUIRED)
@@ -243,6 +311,10 @@ else()
     message(FATAL_ERROR "TRITON_PYTORCH_ENABLE_TORCHTRT is ON when TRITON_ENABLE_GPU is OFF")
   endif()
 endif() # TRITON_ENABLE_GPU
+
+if(TRITON_PYTORCH_ENABLE_PT2)
+  add_compile_definitions(TRITON_PYTORCH_ENABLE_PT2=1)
+endif()
 
 if(${TRITON_ENABLE_NVTX})
   add_definitions(-DTRITON_ENABLE_NVTX=1)
@@ -256,9 +328,11 @@ configure_file(src/libtriton_pytorch.ldscript libtriton_pytorch.ldscript COPYONL
 set(PT_LIBS
     "libc10.so"
     "libc10_cuda.so"
+    "libc10_hip.so"
     "libtorch.so"
     "libtorch_cpu.so"
     "libtorch_cuda.so"
+    "libtorch_hip.so"
     "libtorch_cuda_linalg.so"
     "libtorch_global_deps.so"
     "libjpeg.so.62"
@@ -268,12 +342,6 @@ set(PT_LIBS
     "libtorch_python.so"
     "libcaffe2_nvrtc.so"
 )
-
-if(USE_HCU)
-  # Hygon PyTorch ships HIP-named libraries instead of the CUDA ones.
-  list(REMOVE_ITEM PT_LIBS "libc10_cuda.so" "libtorch_cuda.so" "libtorch_cuda_linalg.so" "libcaffe2_nvrtc.so" "libjpeg.so.62" "libpng16.so.16")
-  list(APPEND PT_LIBS "libc10_hip.so" "libtorch_hip.so")
-endif()
 
 if (${TRITON_PYTORCH_NVSHMEM})
   set(PT_LIBS
@@ -419,10 +487,9 @@ add_library(
   src/pt/model_instance_state.cc
 )
 
-# The DTK/HIP PyTorch distribution does not provide the AOTInductor
-# headers or runtime symbols, so PT2 (torch_aoti) support is disabled
-# for HCU builds. TorchScript (.pt) models are unaffected.
-if(NOT USE_HCU)
+# PT2 (torch_aoti) sources are only built when the installed PyTorch
+# distribution provides the AOTInductor package loader.
+if(TRITON_PYTORCH_ENABLE_PT2)
   target_sources(
     triton-pytorch-backend PRIVATE
     src/pt2/model_state.cc
@@ -466,6 +533,10 @@ if(USE_HCU)
     triton-pytorch-backend BEFORE PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/src/hcu_cuda_shim
   )
+  # Make the CUDA -> HIP runtime mappings visible in every translation unit
+  # (the backend and Torch headers use the cuda* spellings).
+  target_compile_options(triton-pytorch-backend PRIVATE
+    -include "${CMAKE_CURRENT_SOURCE_DIR}/src/hcu_cuda_shim/cuda_runtime_api.h")
 endif()
 
 # Need to turn off -Werror due to Torchvision vision.h extern initialization
@@ -559,10 +630,14 @@ message(TRACE "TRITON_PYTORCH_LIBS: ${TRITON_PYTORCH_LIBS}")
 target_link_libraries(
   triton-pytorch-backend
   PRIVATE
-    triton-core-serverapi  # from repo-core
-    triton-core-backendapi # from repo-core
-    triton-core-serverstub # from repo-core
-    triton-backend-utils   # from repo-backend
+    triton-core-serverapi
+    triton-core-backendapi
+    triton-core-serverstub
+    triton-backend-utils
+    kernel_library_new
+    triton-common-async-work-queue
+    triton-common-logging
+    triton-common-error
     ${CMAKE_DL_LIBS}       # dlopen/dlsym/dlclose for the MODEL_INIT_LIBRARY hook
     ${TRITON_PYTORCH_LDFLAGS}
     ${TRITON_PYTORCH_LIBS}
@@ -625,6 +700,17 @@ if (${TRITON_PYTORCH_DOCKER_BUILD})
   ENDFOREACH(plib)
 
 else()
+  # Keep only the libraries that this PyTorch distribution actually ships
+  # (CUDA- vs HIP-named, optional components, ...).
+  set(_PT_LIBS_AVAILABLE "")
+  foreach(plib ${PT_LIBS})
+    if(EXISTS "${TRITON_PYTORCH_LIB_PATHS}/${plib}")
+      list(APPEND _PT_LIBS_AVAILABLE ${plib})
+    endif()
+  endforeach()
+  set(PT_LIBS ${_PT_LIBS_AVAILABLE})
+  list(REMOVE_DUPLICATES PT_LIBS)
+
   FOREACH(plib ${PT_LIBS})
     set(PT_LIB_PATHS ${PT_LIB_PATHS} "${TRITON_PYTORCH_LIB_PATHS}/${plib}")
   ENDFOREACH(plib)

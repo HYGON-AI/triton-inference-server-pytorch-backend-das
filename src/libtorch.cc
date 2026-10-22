@@ -28,7 +28,7 @@
 
 #include "pt/model_instance_state.hh"
 #include "pt/model_state.hh"
-#ifndef USE_HCU
+#ifdef TRITON_PYTORCH_ENABLE_PT2
 #include "pt2/model_instance_state.hh"
 #include "pt2/model_state.hh"
 #endif
@@ -148,7 +148,7 @@ GetModelInfo(
       }
 
       is_pt2 = (platform == "torch_aoti");
-#ifdef USE_HCU
+#ifndef TRITON_PYTORCH_ENABLE_PT2
       if (is_pt2) {
         return TRITONSERVER_ErrorNew(
             TRITONSERVER_ERROR_UNSUPPORTED,
@@ -265,7 +265,7 @@ TRITONBACKEND_ModelInitialize(TRITONBACKEND_Model* model)
   RETURN_IF_ERROR(
       GetModelInfo(model, model_name, model_version, artifact_type, is_pt2));
 
-#ifndef USE_HCU
+#ifdef TRITON_PYTORCH_ENABLE_PT2
   if (is_pt2) {
     // Create an ModelState object and associate it with the
     // TRITONBACKEND_Model.
@@ -319,7 +319,7 @@ TRITONBACKEND_ModelFinalize(TRITONBACKEND_Model* model)
   void* vmodel;
   RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodel));
 
-#ifndef USE_HCU
+#ifdef TRITON_PYTORCH_ENABLE_PT2
   if (is_pt2) {
     pt2::ModelState* model_state = reinterpret_cast<pt2::ModelState*>(vmodel);
 
@@ -362,7 +362,7 @@ TRITONBACKEND_ModelInstanceInitialize(TRITONBACKEND_ModelInstance* instance)
   void* vmodel;
   RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodel));
 
-#ifndef USE_HCU
+#ifdef TRITON_PYTORCH_ENABLE_PT2
   if (is_pt2) {
     auto model_state = reinterpret_cast<pt2::ModelState*>(vmodel);
 
@@ -428,7 +428,7 @@ TRITONBACKEND_ModelInstanceFinalize(TRITONBACKEND_ModelInstance* instance)
   void* vmodel;
   RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(instance, &vmodel));
 
-#ifndef USE_HCU
+#ifdef TRITON_PYTORCH_ENABLE_PT2
   if (is_pt2) {
     auto instance_state = reinterpret_cast<pt2::ModelInstanceState*>(vmodel);
     delete instance_state;
@@ -476,7 +476,7 @@ TRITONBACKEND_ModelInstanceExecute(
   // function-local and model-instance-specific state (obtained from
   // 'instance'), which is what we do here.
 
-#ifndef USE_HCU
+#ifdef TRITON_PYTORCH_ENABLE_PT2
   if (is_pt2) {
     pt2::ModelInstanceState* instance_state{nullptr};
     RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(

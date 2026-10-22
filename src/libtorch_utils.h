@@ -38,9 +38,9 @@
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #pragma warning(push, 0)
 #include <torch/csrc/jit/codegen/cuda/interface.h>
-#ifndef USE_HCU
-// Not shipped by the Hygon/HIP PyTorch distribution; the legacy fuser
-// API is not used by this backend.
+// Some PyTorch distributions (e.g. Hygon DTK) do not ship the legacy
+// fuser interface header; this backend does not require it.
+#if __has_include(<torch/csrc/jit/codegen/fuser/interface.h>)
 #include <torch/csrc/jit/codegen/fuser/interface.h>
 #endif
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
